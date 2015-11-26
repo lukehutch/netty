@@ -15,9 +15,11 @@
  */
 package io.netty.handler.codec.http.cookie;
 
-import static io.netty.handler.codec.http.cookie.CookieUtil.*;
+import static io.netty.handler.codec.http.cookie.CookieUtil.add;
+import static io.netty.handler.codec.http.cookie.CookieUtil.addQuoted;
+import static io.netty.handler.codec.http.cookie.CookieUtil.stringBuilder;
+import static io.netty.handler.codec.http.cookie.CookieUtil.stripTrailingSeparator;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
-
 import io.netty.handler.codec.http.HttpHeaderDateFormat;
 import io.netty.handler.codec.http.HttpRequest;
 
@@ -25,7 +27,10 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A <a href="http://tools.ietf.org/html/rfc6265">RFC6265</a> compliant cookie encoder to be used server side,
@@ -47,12 +52,15 @@ public final class ServerCookieEncoder extends CookieEncoder {
 
     /**
      * Strict encoder that validates that name and value chars are in the valid scope
-     * defined in RFC6265
+     * defined in RFC6265, and (for methods that accept multiple cookies) that only
+     * one cookie is encoded with any given name. (If multiple cookies have the same
+     * name, the last one is the one that is encoded.)
      */
     public static final ServerCookieEncoder STRICT = new ServerCookieEncoder(true);
 
     /**
-     * Lax instance that doesn't validate name and value
+     * Lax instance that doesn't validate name and value, and that allows multiple
+     * cookies with the same name.
      */
     public static final ServerCookieEncoder LAX = new ServerCookieEncoder(false);
 
@@ -114,6 +122,26 @@ public final class ServerCookieEncoder extends CookieEncoder {
         return stripTrailingSeparator(buf);
     }
 
+    /** Deduplicate a list of encoded cookies by keeping only the last instance with a given name.
+     *
+     * @param encoded The list of encoded cookies.
+     * @param nameToIndex A map from cookie name to index in encoded list of last cookie instance.
+     * @return The encoded list with all but the last instance of a named cookie.
+     */
+    private List<String> dedup(List<String> encoded, Map<String, Integer> nameToIndex) {
+        boolean[] isLastInstance = new boolean[encoded.size()];
+        for (int idx : nameToIndex.values()) {
+            isLastInstance[idx] = true;
+        }
+        List<String> dedupd = new ArrayList<String>(nameToIndex.size());
+        for (int i = 0, n = encoded.size(); i < n; i++) {
+            if (isLastInstance[i]) {
+                dedupd.add(encoded.get(i));
+            }
+        }
+        return dedupd;
+    }
+
     /**
      * Batch encodes cookies into Set-Cookie header values.
      *
@@ -126,13 +154,16 @@ public final class ServerCookieEncoder extends CookieEncoder {
         }
 
         List<String> encoded = new ArrayList<String>(cookies.length);
-        for (Cookie c : cookies) {
-            if (c == null) {
-                break;
-            }
+        Map<String, Integer> nameToIndex = strict ? new HashMap<String, Integer>() : null;
+        boolean hasDupdName = false;
+        for (int i = 0; i < cookies.length; i++) {
+            Cookie c = cookies[i];
             encoded.add(encode(c));
+            if (strict) {
+                hasDupdName |= nameToIndex.put(c.name(), i) != null;
+            }
         }
-        return encoded;
+        return hasDupdName ? dedup(encoded, nameToIndex) : encoded;
     }
 
     /**
@@ -147,13 +178,16 @@ public final class ServerCookieEncoder extends CookieEncoder {
         }
 
         List<String> encoded = new ArrayList<String>(cookies.size());
+        Map<String, Integer> nameToIndex = strict ? new HashMap<String, Integer>() : null;
+        boolean hasDupdName = false;
+        int i = 0;
         for (Cookie c : cookies) {
-            if (c == null) {
-                break;
-            }
             encoded.add(encode(c));
+            if (strict) {
+                hasDupdName |= nameToIndex.put(c.name(), i++) != null;
+            }
         }
-        return encoded;
+        return hasDupdName ? dedup(encoded, nameToIndex) : encoded;
     }
 
     /**
@@ -163,17 +197,21 @@ public final class ServerCookieEncoder extends CookieEncoder {
      * @return the corresponding bunch of Set-Cookie headers
      */
     public List<String> encode(Iterable<? extends Cookie> cookies) {
-        if (!checkNotNull(cookies, "cookies").iterator().hasNext()) {
+        Iterator<? extends Cookie> cookiesIt = checkNotNull(cookies, "cookies").iterator();
+        if (!cookiesIt.hasNext()) {
             return Collections.emptyList();
         }
 
         List<String> encoded = new ArrayList<String>();
+        Map<String, Integer> nameToIndex = strict ? new HashMap<String, Integer>() : null;
+        boolean hasDupdName = false;
+        int i = 0;
         for (Cookie c : cookies) {
-            if (c == null) {
-                break;
-            }
             encoded.add(encode(c));
+            if (strict) {
+                hasDupdName |= nameToIndex.put(c.name(), i++) != null;
+            }
         }
-        return encoded;
+        return hasDupdName ? dedup(encoded, nameToIndex) : encoded;
     }
 }
